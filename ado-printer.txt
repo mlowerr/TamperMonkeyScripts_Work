@@ -1,0 +1,339 @@
+// ==UserScript==
+// @name         Azure DevOps Hierarchy Printer
+// @namespace    http://tampermonkey.net/
+// @version      1.5
+// @description  Prints work item hierarchy. Stops at Epics. Excludes Closed/Removed items from tree. Supports Text, MD, HTML.
+// @author       Gemini
+// @match        https://dev.azure.com/*
+// @match        https://*.visualstudio.com/*
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- Configuration ---
+    const API_VERSION = "6.0";
+
+    /**
+     * Helper to determine the Base API URL based on current page structure.
+     */
+    function getBaseApiUrl() {
+        const pathParts = window.location.pathname.split('/');
+        if (window.location.hostname === 'dev.azure.com') {
+            if (pathParts.length >= 2) {
+                return `${window.location.origin}/${pathParts[1]}/_apis/wit/workitems`;
+            }
+        }
+        return `${window.location.origin}/_apis/wit/workitems`;
+    }
+
+    async function fetchWorkItem(id) {
+        const url = `${getBaseApiUrl()}/${id}?$expand=relations&api-version=${API_VERSION}`;
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            return await response.json();
+        } catch (e) {
+            console.error(`Failed to fetch ID ${id}`, e);
+            return null;
+        }
+    }
+
+    function getTypeLetter(typeName) {
+        if (!typeName) return "?";
+        return typeName.charAt(0).toUpperCase();
+    }
+
+    /**
+     * Recursive function to traverse down the tree.
+     * Now filters out Closed and Removed items.
+     */
+    async function traverseDown(itemId, visitedSet, resultsArray, level = 0) {
+        if (visitedSet.has(itemId)) return;
+        visitedSet.add(itemId);
+
+        const item = await fetchWorkItem(itemId);
+        if (!item) return;
+
+        // Extract Data
+        const type = item.fields['System.WorkItemType'];
+        const state = item.fields['System.State'];
+        const letter = getTypeLetter(type);
+        const title = item.fields['System.Title'];
+        const url = item._links?.html?.href || '#';
+
+        // Filter Logic: Only add to results if NOT Closed or Removed
+        const isExcluded = ['Closed', 'Removed'].includes(state);
+
+        if (!isExcluded) {
+            resultsArray.push({
+                id: itemId,
+                letter: letter,
+                title: title,
+                url: url,
+                level: level
+            });
+        }
+
+        // We still traverse children even if parent is excluded
+        // (e.g. finding active Features under a Closed Epic)
+        if (item.relations) {
+            const children = item.relations.filter(r => r.rel === "System.LinkTypes.Hierarchy-Forward");
+            for (const child of children) {
+                const childId = child.url.split('/').pop();
+                await traverseDown(childId, visitedSet, resultsArray, level + 1);
+            }
+        }
+    }
+
+    /**
+     * Climbs up to find the root, BUT stops if it hits an 'Epic'.
+     */
+    async function getRootId(startId) {
+        let currentId = startId;
+        let currentItem = await fetchWorkItem(currentId);
+
+        if (!currentItem) return null;
+
+        if (currentItem.fields['System.WorkItemType'] === 'Epic') {
+            updateStatus("🏁 Started on Epic. Using as Root.");
+            return currentId;
+        }
+
+        let parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+
+        while (parentRel) {
+            const parentId = parentRel.url.split('/').pop();
+            updateStatus(`⬆️ Climbing to parent: ${parentId}...`);
+
+            const parentItem = await fetchWorkItem(parentId);
+            if (!parentItem) break;
+
+            currentId = parentId;
+            currentItem = parentItem;
+
+            if (currentItem.fields['System.WorkItemType'] === 'Epic') {
+                updateStatus(`🏔️ Reached Epic (${currentId}). Stopping climb.`);
+                break;
+            }
+
+            parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+        }
+
+        return currentId;
+    }
+
+    async function getHierarchyData(startId) {
+        updateStatus(`🚀 Scanning hierarchy for ID: ${startId}...`);
+
+        const rootId = await getRootId(startId);
+        if (!rootId) {
+            updateStatus("❌ Could not determine root.");
+            return null;
+        }
+
+        updateStatus(`🌳 Root found (${rootId}). Traversing children (Active only)...`);
+
+        const results = [];
+        const visited = new Set();
+
+        await traverseDown(rootId, visited, results);
+        return results;
+    }
+
+    async function getSingleItemData(id) {
+        updateStatus(`🔍 Fetching item ${id}...`);
+        const item = await fetchWorkItem(id);
+        if (!item) {
+            updateStatus("❌ Item not found");
+            return null;
+        }
+        return {
+            id: id,
+            letter: getTypeLetter(item.fields['System.WorkItemType']),
+            title: item.fields['System.Title'],
+            url: item._links?.html?.href || '#'
+        };
+    }
+
+    // --- Formatters ---
+
+    const Formatters = {
+        text: (row) => `[${row.letter}${row.id}] ${row.title}`,
+        markdown: (row) => `[[${row.letter}${row.id}]](${row.url}) ${row.title}`,
+        html: (row) => `<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`
+    };
+
+    // --- Output Handlers ---
+
+    async function processAction(mode, format) {
+        const id = getIdFromInput();
+        if (!id) return;
+
+        const scope = document.getElementById('ado-scope-select').value; // 'tree' or 'single'
+
+        if (scope === 'tree') {
+            const data = await getHierarchyData(id);
+            if (!data) return;
+            const lines = data.map(Formatters[format]);
+            handleOutput(lines, mode, format, `Tree (${data.length} items)`);
+        }
+        else {
+            const itemData = await getSingleItemData(id);
+            if (!itemData) return;
+            const line = Formatters[format](itemData);
+            handleOutput([line], mode, format, `Item ${id}`);
+        }
+    }
+
+    function handleOutput(linesArray, mode, format, label) {
+        const content = linesArray.join(format === 'html' ? '<br>' : '\n');
+
+        if (mode === 'console') {
+            console.log(`%c 📋 ${label} [${format.toUpperCase()}]:`, 'font-weight: bold; font-size: 14px; color: #00d4ff;');
+            if (format === 'html' || format === 'markdown') {
+                console.log(content);
+            } else {
+                linesArray.forEach(l => console.log(l));
+            }
+            updateStatus(`✅ Logged ${label} as ${format.toUpperCase()}`);
+        }
+        else if (mode === 'clipboard') {
+            if (format === 'html') {
+                GM_setClipboard(content, 'text/html');
+            } else {
+                GM_setClipboard(content, 'text');
+            }
+            updateStatus(`✅ Copied ${label} as ${format.toUpperCase()}`);
+        }
+    }
+
+    // --- UI Helpers ---
+
+    function updateStatus(msg) {
+        const el = document.getElementById('ado-printer-status');
+        if (el) el.innerText = msg;
+    }
+
+    function getUrlId() {
+        const urlMatch = window.location.pathname.match(/\/edit\/(\d+)/);
+        if (urlMatch) return urlMatch[1];
+        return "";
+    }
+
+    function getIdFromInput() {
+        const val = document.getElementById('ado-id-input').value.trim();
+        if (!val) {
+            alert("Please enter a Work Item ID.");
+            return null;
+        }
+        return val;
+    }
+
+    // --- UI Creation ---
+    function createControlBar() {
+        if (document.getElementById('ado-printer-toolbar')) return;
+
+        const div = document.createElement('div');
+        div.id = 'ado-printer-toolbar';
+
+        Object.assign(div.style, {
+            position: 'fixed',
+            top: '0', left: '0', right: '0',
+            height: '44px',
+            backgroundColor: '#252526',
+            color: '#cccccc',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '0 15px',
+            zIndex: '10000',
+            fontFamily: 'Segoe UI, sans-serif',
+            fontSize: '12px',
+            boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
+            borderBottom: '1px solid #3e3e42'
+        });
+
+        // Helper for buttons
+        const makeBtn = (text, title, color, actionId) => {
+            return `<button class="ado-btn" data-action="${actionId}" title="${title}"
+                    style="background:${color}; border:1px solid transparent; color:white; margin-left:4px; padding:3px 8px; cursor:pointer; border-radius:2px;">
+                    ${text}</button>`;
+        };
+
+        const clipColor = '#0078d4'; // Blue
+        const conColor = '#444444'; // Dark Grey
+
+        div.innerHTML = `
+            <span style="font-weight:bold; color: #00d4ff; margin-right:10px;">ADO Print</span>
+
+            <input type="text" id="ado-id-input" value="${getUrlId()}" placeholder="ID"
+                   style="width: 50px; background:#333; color:#fff; border:1px solid #555; text-align:center; padding:3px;">
+            <button id="ado-refresh-id" title="Refresh ID" style="cursor:pointer; background:none; border:none; color:#aaa;">🔄</button>
+
+            <div style="width: 1px; height: 20px; background: #555; margin: 0 10px;"></div>
+
+            <!-- Scope Selector -->
+            <label for="ado-scope-select" style="color:#aaa; margin-right:5px;">Scope:</label>
+            <select id="ado-scope-select" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-right:10px;">
+                <option value="single">Single Item</option>
+                <option value="tree">Tree (Active)</option>
+            </select>
+
+            <div style="width: 1px; height: 20px; background: #555; margin: 0 8px;"></div>
+
+            <span style="color:#aaa; margin-right:4px;">Clip:</span>
+            ${makeBtn('Txt', 'Copy Plain Text', clipColor, 'clip-text')}
+            ${makeBtn('MD', 'Copy Markdown', clipColor, 'clip-markdown')}
+            ${makeBtn('HTML', 'Copy HTML', clipColor, 'clip-html')}
+
+            <div style="width: 1px; height: 20px; background: #555; margin: 0 8px;"></div>
+
+            <span style="color:#aaa; margin-right:4px;">Log:</span>
+            ${makeBtn('Txt', 'Log Plain Text', conColor, 'con-text')}
+            ${makeBtn('MD', 'Log Markdown', conColor, 'con-markdown')}
+            ${makeBtn('HTML', 'Log HTML', conColor, 'con-html')}
+
+            <div style="flex-grow: 1; text-align: right; margin-left: 10px;">
+                <span id="ado-printer-status" style="color: #888; font-style: italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Ready</span>
+            </div>
+            <button id="ado-close-bar" style="background:none; border:none; color:#999; cursor:pointer; font-size:16px; margin-left:10px;">&times;</button>
+        `;
+
+        document.body.appendChild(div);
+
+        // Button Logic
+        const actions = {
+            'clip-text': () => processAction('clipboard', 'text'),
+            'clip-markdown': () => processAction('clipboard', 'markdown'),
+            'clip-html': () => processAction('clipboard', 'html'),
+            'con-text': () => processAction('console', 'text'),
+            'con-markdown': () => processAction('console', 'markdown'),
+            'con-html': () => processAction('console', 'html'),
+        };
+
+        div.querySelectorAll('.ado-btn').forEach(btn => {
+            btn.onclick = () => {
+                const actionKey = btn.getAttribute('data-action');
+                if (actions[actionKey]) actions[actionKey]();
+            };
+            btn.onmouseover = () => { btn.style.border = '1px solid #888'; };
+            btn.onmouseout = () => { btn.style.border = '1px solid transparent'; };
+        });
+
+        document.getElementById('ado-refresh-id').onclick = () => {
+             const id = getUrlId();
+             if (id) document.getElementById('ado-id-input').value = id;
+        };
+
+        document.getElementById('ado-close-bar').onclick = () => {
+            div.style.display = 'none';
+        };
+    }
+
+    // --- Init ---
+    setTimeout(createControlBar, 2000);
+    console.log("ADO Hierarchy Printer v1.5 loaded.");
+
+})();
