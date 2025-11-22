@@ -22,10 +22,8 @@
 
     function getBaseApiUrl() {
         const pathParts = window.location.pathname.split('/');
-        if (window.location.hostname === 'YOUR-TENNANT-HERE.visualstudio.com') {
-            if (pathParts.length >= 2) {
-                return `${window.location.origin}/${pathParts[1]}/_apis/wit/workitems`;
-            }
+        if (window.location.hostname.endsWith('.visualstudio.com') && pathParts[1]) {
+            return `${window.location.origin}/${pathParts[1]}/_apis/wit/workitems`;
         }
         return `${window.location.origin}/_apis/wit/workitems`;
     }
