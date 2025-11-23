@@ -117,33 +117,34 @@
      */
     async function getRootId(startId) {
         let currentId = startId;
-        let currentItem = await fetchWorkItem(currentId);
+        const visited = new Set();
 
-        if (!currentItem) return null;
+        while (currentId && !visited.has(currentId)) {
+            visited.add(currentId);
+            const currentItem = await fetchWorkItem(currentId);
 
-        if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
-            updateStatus("🏁 Started on Initiative. Using as Root.");
-            return currentId;
-        }
+            if (!currentItem) return null;
 
-        let parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
-
-        while (parentRel) {
-            const parentId = parentRel.url.split('/').pop();
-            updateStatus(`⬆️ Climbing to parent: ${parentId}...`);
-
-            const parentItem = await fetchWorkItem(parentId);
-            if (!parentItem) break;
-
-            currentId = parentId;
-            currentItem = parentItem;
-
-            if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
-                updateStatus(`🏔️ Reached Initiative (${currentId}). Stopping climb.`);
+            const currentType = normalizeType(currentItem.fields['System.WorkItemType']);
+            if (currentType === 'initiative') {
+                updateStatus(`🏔️ Using Initiative (${currentId}) as root.`);
                 break;
             }
 
-            parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+            const parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+            if (!parentRel) {
+                updateStatus('🔝 No Initiative found above; using current item as root.');
+                break;
+            }
+
+            const parentId = parentRel.url.split('/').pop();
+            if (visited.has(parentId)) {
+                updateStatus('♻️ Detected circular parent links; stopping climb.');
+                break;
+            }
+
+            updateStatus(`⬆️ Climbing to parent: ${parentId}...`);
+            currentId = parentId;
         }
 
         return currentId;
