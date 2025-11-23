@@ -46,11 +46,26 @@
         return typeName.charAt(0).toUpperCase();
     }
 
+    const HIERARCHY_RULES = {
+        initiative: ['epic'],
+        epic: ['feature'],
+        feature: ['user story', 'story', 'bug']
+    };
+
+    function normalizeType(type) {
+        return (type || '').toLowerCase();
+    }
+
+    function isTerminalType(type) {
+        const t = normalizeType(type);
+        return t === 'story' || t === 'user story' || t === 'bug';
+    }
+
     /**
      * Recursive function to traverse down the tree.
      * Now filters out Closed and Removed items.
      */
-    async function traverseDown(itemId, visitedSet, resultsArray, level = 0) {
+    async function traverseDown(itemId, visitedSet, resultsArray, level = 0, parentType = null) {
         if (visitedSet.has(itemId)) return;
         visitedSet.add(itemId);
 
@@ -59,10 +74,19 @@
 
         // Extract Data
         const type = item.fields['System.WorkItemType'];
+        const normalizedType = normalizeType(type);
         const state = item.fields['System.State'];
         const letter = getTypeLetter(type);
         const title = item.fields['System.Title'];
         const url = item._links?.html?.href || '#';
+
+        if (parentType) {
+            const allowedChildren = HIERARCHY_RULES[normalizeType(parentType)];
+            if (allowedChildren && !allowedChildren.includes(normalizedType)) {
+                console.warn(`Skipping child ${itemId} (${type}) of ${parentType} due to hierarchy rules.`);
+                return;
+            }
+        }
 
         // Filter Logic: Only add to results if NOT Closed or Removed
         const isExcluded = ['Closed', 'Removed'].includes(state);
@@ -79,17 +103,17 @@
 
         // We still traverse children even if parent is excluded
         // (e.g. finding active Features under a Closed Epic)
-        if (item.relations) {
+        if (!isTerminalType(type) && item.relations) {
             const children = item.relations.filter(r => r.rel === "System.LinkTypes.Hierarchy-Forward");
             for (const child of children) {
                 const childId = child.url.split('/').pop();
-                await traverseDown(childId, visitedSet, resultsArray, level + 1);
+                await traverseDown(childId, visitedSet, resultsArray, level + 1, type);
             }
         }
     }
 
     /**
-     * Climbs up to find the root, BUT stops if it hits an 'Epic'.
+     * Climbs up to find the root, stopping only if it hits an 'Initiative' or the top.
      */
     async function getRootId(startId) {
         let currentId = startId;
@@ -97,8 +121,8 @@
 
         if (!currentItem) return null;
 
-        if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-            updateStatus("🏁 Started on Epic. Using as Root.");
+        if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+            updateStatus("🏁 Started on Initiative. Using as Root.");
             return currentId;
         }
 
@@ -114,8 +138,8 @@
             currentId = parentId;
             currentItem = parentItem;
 
-            if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-                updateStatus(`🏔️ Reached Epic (${currentId}). Stopping climb.`);
+            if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+                updateStatus(`🏔️ Reached Initiative (${currentId}). Stopping climb.`);
                 break;
             }
 

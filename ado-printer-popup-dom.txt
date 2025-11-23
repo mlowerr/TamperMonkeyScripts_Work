@@ -47,7 +47,22 @@
 
     // --- Hierarchy Logic ---
 
-    async function traverseDown(itemId, visitedSet, resultsArray, level = 0) {
+    const HIERARCHY_RULES = {
+        initiative: ['epic'],
+        epic: ['feature'],
+        feature: ['user story', 'story', 'bug']
+    };
+
+    function normalizeType(type) {
+        return (type || '').toLowerCase();
+    }
+
+    function isTerminalType(type) {
+        const t = normalizeType(type);
+        return t === 'story' || t === 'user story' || t === 'bug';
+    }
+
+    async function traverseDown(itemId, visitedSet, resultsArray, level = 0, parentType = null) {
         if (visitedSet.has(itemId)) return;
         visitedSet.add(itemId);
 
@@ -55,10 +70,19 @@
         if (!item) return;
 
         const type = item.fields['System.WorkItemType'];
+        const normalizedType = normalizeType(type);
         const state = item.fields['System.State'];
         const letter = getTypeLetter(type);
         const title = item.fields['System.Title'];
         const url = item._links?.html?.href || '#';
+
+        if (parentType) {
+            const allowedChildren = HIERARCHY_RULES[normalizeType(parentType)];
+            if (allowedChildren && !allowedChildren.includes(normalizedType)) {
+                console.warn(`Skipping child ${itemId} (${type}) of ${parentType} due to hierarchy rules.`);
+                return;
+            }
+        }
 
         const isExcluded = ['Closed', 'Removed'].includes(state);
 
@@ -72,11 +96,11 @@
             });
         }
 
-        if (item.relations) {
+        if (!isTerminalType(type) && item.relations) {
             const children = item.relations.filter(r => r.rel === "System.LinkTypes.Hierarchy-Forward");
             for (const child of children) {
                 const childId = child.url.split('/').pop();
-                await traverseDown(childId, visitedSet, resultsArray, level + 1);
+                await traverseDown(childId, visitedSet, resultsArray, level + 1, type);
             }
         }
     }
@@ -87,8 +111,8 @@
 
         if (!currentItem) return null;
 
-        if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-            statusCallback("🏁 Started on Epic.");
+        if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+            statusCallback("🏁 Started on Initiative.");
             return currentId;
         }
 
@@ -104,8 +128,8 @@
             currentId = parentId;
             currentItem = parentItem;
 
-            if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-                statusCallback(`🏔️ Reached Epic (${currentId}).`);
+            if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+                statusCallback(`🏔️ Reached Initiative (${currentId}).`);
                 break;
             }
 
