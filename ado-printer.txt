@@ -19,7 +19,7 @@
     /**
      * Helper to determine the Base API URL based on current page structure.
      */
-    function getBaseApiUrl() {
+     function getBaseApiUrl() {
         const pathParts = window.location.pathname.split('/');
 
         if (window.location.hostname === 'dev.azure.com' && pathParts[1]) {
@@ -28,6 +28,9 @@
 
         if (window.location.hostname.endsWith('.visualstudio.com') && pathParts[1]) {
             return `${window.location.origin}/${pathParts[1]}/_apis/wit/workitems`;
+        }
+
+        return `${window.location.origin}/_apis/wit/workitems`;
         }
 
         return `${window.location.origin}/_apis/wit/workitems`;
@@ -356,5 +359,6 @@
     // --- Init ---
     setTimeout(createControlBar, 2000);
     console.log("ADO Hierarchy Printer v1.5 loaded.");
+
 
 })();
