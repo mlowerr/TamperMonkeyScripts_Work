@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ADO Contextual Printer (DOM Based)
+// @name         Azure DevOps Hierarchy Printer
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Injects toolbar directly into .work-item-form-page. Scrapes ID contextually.
+// @version      2.0
+// @description  Prints work item hierarchy with Initiative awareness. Excludes Removed items. Supports Direct/Full tree modes.
 // @author       Gemini
 // @match        https://dev.azure.com/*
 // @match        https://*.visualstudio.com/*
@@ -15,15 +15,22 @@
 
     // --- Configuration ---
     const API_VERSION = "6.0";
-    const CONTAINER_SELECTOR = '.work-item-form-page';
-    const LINK_SELECTOR = 'a[href*="/_workitems/edit/"]';
 
-    // --- API Helpers ---
+    // Work Item Hierarchy
+    const HIERARCHY = {
+        'Initiative': 0,
+        'Epic': 1,
+        'Feature': 2,
+        'User Story': 3,
+        'Bug': 3
+    };
 
     function getBaseApiUrl() {
         const pathParts = window.location.pathname.split('/');
-        if (window.location.hostname.endsWith('.visualstudio.com') && pathParts[1]) {
-            return `${window.location.origin}/${pathParts[1]}/_apis/wit/workitems`;
+        if (window.location.hostname === 'dev.azure.com') {
+            if (pathParts.length >= 2) {
+                return `${window.location.origin}/${pathParts[1]}/_apis/wit/workitems`;
+            }
         }
         return `${window.location.origin}/_apis/wit/workitems`;
     }
@@ -42,27 +49,22 @@
 
     function getTypeLetter(typeName) {
         if (!typeName) return "?";
-        return typeName.charAt(0).toUpperCase();
+        const typeMap = {
+            'Initiative': 'I',
+            'Epic': 'E',
+            'Feature': 'F',
+            'User Story': 'S',
+            'Bug': 'B'
+        };
+        return typeMap[typeName] || typeName.charAt(0).toUpperCase();
     }
 
-    // --- Hierarchy Logic ---
-
-    const HIERARCHY_RULES = {
-        initiative: ['epic'],
-        epic: ['feature'],
-        feature: ['user story', 'story', 'bug']
-    };
-
-    function normalizeType(type) {
-        return (type || '').toLowerCase();
+    function shouldStopTraversal(typeName) {
+        // Stop if we're at Story or Bug level (don't go deeper)
+        return typeName === 'User Story' || typeName === 'Bug';
     }
 
-    function isTerminalType(type) {
-        const t = normalizeType(type);
-        return t === 'story' || t === 'user story' || t === 'bug';
-    }
-
-    async function traverseDown(itemId, visitedSet, resultsArray, level = 0, parentType = null) {
+    async function traverseDown(itemId, visitedSet, resultsArray, level = 0) {
         if (visitedSet.has(itemId)) return;
         visitedSet.add(itemId);
 
@@ -70,190 +72,322 @@
         if (!item) return;
 
         const type = item.fields['System.WorkItemType'];
-        const normalizedType = normalizeType(type);
         const state = item.fields['System.State'];
         const letter = getTypeLetter(type);
         const title = item.fields['System.Title'];
+        const assignedTo = item.fields['System.AssignedTo']?.displayName || 'Unassigned';
         const url = item._links?.html?.href || '#';
 
-        if (parentType) {
-            const allowedChildren = HIERARCHY_RULES[normalizeType(parentType)];
-            if (allowedChildren && !allowedChildren.includes(normalizedType)) {
-                console.warn(`Skipping child ${itemId} (${type}) of ${parentType} due to hierarchy rules.`);
-                return;
-            }
-        }
+        // Never include Removed items
+        if (state === 'Removed') return;
 
-        const isExcluded = ['Closed', 'Removed'].includes(state);
+        resultsArray.push({
+            id: itemId,
+            letter: letter,
+            title: title,
+            url: url,
+            level: level,
+            state: state,
+            assignedTo: assignedTo,
+            type: type
+        });
 
-        if (!isExcluded) {
-            resultsArray.push({
-                id: itemId,
-                letter: letter,
-                title: title,
-                url: url,
-                level: level
-            });
-        }
+        // Stop traversing below Story/Bug level
+        if (shouldStopTraversal(type)) return;
 
-        if (!isTerminalType(type) && item.relations) {
+        if (item.relations) {
             const children = item.relations.filter(r => r.rel === "System.LinkTypes.Hierarchy-Forward");
             for (const child of children) {
                 const childId = child.url.split('/').pop();
-                await traverseDown(childId, visitedSet, resultsArray, level + 1, type);
+                await traverseDown(childId, visitedSet, resultsArray, level + 1);
             }
         }
     }
 
-    async function getRootId(startId, statusCallback) {
+    async function getRootId(startId) {
         let currentId = startId;
-        const visited = new Set();
+        let currentItem = await fetchWorkItem(currentId);
 
-        while (currentId && !visited.has(currentId)) {
-            visited.add(currentId);
-            const currentItem = await fetchWorkItem(currentId);
+        if (!currentItem) return null;
 
-            if (!currentItem) return null;
+        if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+            updateStatus("🏁 Started on Initiative. Using as Root.");
+            return currentId;
+        }
 
-            const currentType = normalizeType(currentItem.fields['System.WorkItemType']);
-            if (currentType === 'initiative') {
-                statusCallback(`🏔️ Using Initiative (${currentId}) as root.`);
-                break;
-            }
+        let parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
 
-            const parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
-            if (!parentRel) {
-                statusCallback('🔝 No Initiative found above; using current item as root.');
-                break;
-            }
-
+        while (parentRel) {
             const parentId = parentRel.url.split('/').pop();
-            if (visited.has(parentId)) {
-                statusCallback('♻️ Circular parent links detected; stopping climb.');
+            updateStatus(`⬆️ Climbing to parent: ${parentId}...`);
+
+            const parentItem = await fetchWorkItem(parentId);
+            if (!parentItem) break;
+
+            currentId = parentId;
+            currentItem = parentItem;
+
+            if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+                updateStatus(`🏔️ Reached Initiative (${currentId}). Stopping climb.`);
                 break;
             }
 
-            statusCallback(`⬆️ Parent: ${parentId}...`);
-            currentId = parentId;
+            parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
         }
 
         return currentId;
     }
 
-    async function getHierarchyData(startId, statusCallback) {
-        statusCallback(`🚀 Scanning ${startId}...`);
-        const rootId = await getRootId(startId, statusCallback);
-        if (!rootId) {
-            statusCallback("❌ No Root.");
-            return null;
+    async function getDirectPath(startId) {
+        // Get path from Initiative down to startId
+        const ancestors = [];
+        let currentId = startId;
+        let currentItem = await fetchWorkItem(currentId);
+
+        if (!currentItem) return null;
+
+        // Walk up to Initiative
+        let item = currentItem;
+        let itemId = currentId;
+
+        while (item) {
+            const type = item.fields['System.WorkItemType'];
+            const state = item.fields['System.State'];
+            
+            // Skip Removed items
+            if (state !== 'Removed') {
+                ancestors.unshift({
+                    id: itemId,
+                    letter: getTypeLetter(type),
+                    title: item.fields['System.Title'],
+                    url: item._links?.html?.href || '#',
+                    state: state,
+                    assignedTo: item.fields['System.AssignedTo']?.displayName || 'Unassigned',
+                    type: type
+                });
+            }
+
+            if (type === 'Initiative') break;
+
+            const parentRel = item.relations ? item.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+            if (!parentRel) break;
+
+            itemId = parentRel.url.split('/').pop();
+            updateStatus(`⬆️ Climbing to parent: ${itemId}...`);
+            item = await fetchWorkItem(itemId);
         }
-        statusCallback(`🌳 Root ${rootId}. Scanning children...`);
-        const results = [];
-        const visited = new Set();
-        await traverseDown(rootId, visited, results);
-        return results;
+
+        return ancestors;
     }
 
-    async function getSingleItemData(id, statusCallback) {
-        statusCallback(`🔍 Fetching ${id}...`);
+    async function getHierarchyData(startId, mode = 'direct') {
+        updateStatus(`🚀 Scanning hierarchy for ID: ${startId}...`);
+
+        if (mode === 'full') {
+            // Full tree: climb to Initiative, then traverse all children
+            const rootId = await getRootId(startId);
+            if (!rootId) {
+                updateStatus("❌ Could not determine root.");
+                return null;
+            }
+
+            updateStatus(`🌳 Root found (${rootId}). Traversing children (Active only)...`);
+
+            const results = [];
+            const visited = new Set();
+
+            await traverseDown(rootId, visited, results);
+            return results;
+        } else {
+            // Direct mode: show path to Initiative + all children from startId
+            const directPath = await getDirectPath(startId);
+            if (!directPath || directPath.length === 0) {
+                updateStatus("❌ No path found.");
+                return null;
+            }
+
+            // Find the starting item in the path
+            const startIndex = directPath.findIndex(item => item.id === startId);
+            if (startIndex === -1) {
+                updateStatus("❌ Start item not found in path.");
+                return null;
+            }
+
+            // Add level to path items
+            directPath.forEach((item, idx) => {
+                item.level = idx;
+            });
+
+            // Now traverse down from startId
+            updateStatus(`⬇️ Traversing children of ${startId}...`);
+            const visited = new Set(directPath.map(item => item.id));
+            const childResults = [];
+            
+            const startItem = await fetchWorkItem(startId);
+            if (startItem && startItem.relations) {
+                const children = startItem.relations.filter(r => r.rel === "System.LinkTypes.Hierarchy-Forward");
+                for (const child of children) {
+                    const childId = child.url.split('/').pop();
+                    await traverseDown(childId, visited, childResults, startIndex + 1);
+                }
+            }
+
+            return [...directPath, ...childResults];
+        }
+    }
+
+    async function getSingleItemData(id) {
+        updateStatus(`🔍 Fetching item ${id}...`);
         const item = await fetchWorkItem(id);
         if (!item) {
-            statusCallback("❌ Not found");
+            updateStatus("❌ Item not found");
             return null;
         }
         return {
             id: id,
             letter: getTypeLetter(item.fields['System.WorkItemType']),
             title: item.fields['System.Title'],
-            url: item._links?.html?.href || '#'
+            url: item._links?.html?.href || '#',
+            state: item.fields['System.State'],
+            assignedTo: item.fields['System.AssignedTo']?.displayName || 'Unassigned',
+            type: item.fields['System.WorkItemType'],
+            level: 0
         };
     }
 
-    // --- Formatters & Output ---
+    // --- Formatters ---
 
     const Formatters = {
-        text: (row) => `${'  '.repeat(row.level || 0)}[${row.letter}${row.id}] ${row.title}`,
-        markdown: (row) => `${'  '.repeat(row.level || 0)}[[${row.letter}${row.id}]](${row.url}) ${row.title}`,
-        html: (row) => `${'  '.repeat(row.level || 0)}<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`
+        text: (row, detailLevel) => {
+            const indent = '  '.repeat(row.level);
+            const baseText = `[${row.letter}${row.id}] ${row.title}`;
+            
+            if (detailLevel === 'status') {
+                return `${indent}[Status: ${row.state}] ${baseText}`;
+            } else if (detailLevel === 'status-assigned') {
+                return `${indent}[Status: ${row.state} | Assigned: ${row.assignedTo}] ${baseText}`;
+            }
+            return `${indent}${baseText}`;
+        },
+        markdown: (row, detailLevel) => {
+            const indent = '  '.repeat(row.level);
+            const baseText = `[[${row.letter}${row.id}]](${row.url}) ${row.title}`;
+            
+            if (detailLevel === 'status') {
+                return `${indent}[Status: ${row.state}] ${baseText}`;
+            } else if (detailLevel === 'status-assigned') {
+                return `${indent}[Status: ${row.state} | Assigned: ${row.assignedTo}] ${baseText}`;
+            }
+            return `${indent}${baseText}`;
+        },
+        html: (row, detailLevel) => {
+            const indent = '&nbsp;'.repeat(row.level * 4);
+            const baseText = `<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`;
+            
+            if (detailLevel === 'status') {
+                return `${indent}[Status: ${row.state}] ${baseText}`;
+            } else if (detailLevel === 'status-assigned') {
+                return `${indent}[Status: ${row.state} | Assigned: ${row.assignedTo}] ${baseText}`;
+            }
+            return `${indent}${baseText}`;
+        }
     };
 
-    async function processAction(btnElement, mode, format) {
-        // Find the toolbar container specifically for this button
-        const toolbar = btnElement.closest('.ado-ctx-toolbar');
-        const idInput = toolbar.querySelector('.ado-ctx-id-input');
-        const statusSpan = toolbar.querySelector('.ado-ctx-status');
-        const scopeSelect = toolbar.querySelector('.ado-ctx-scope-select');
+    // --- Output Handlers ---
 
-        const id = idInput.value.trim();
-        const scope = scopeSelect.value;
+    async function processAction(mode, format) {
+        const id = getIdFromInput();
+        if (!id) return;
 
-        const updateStatus = (msg) => { statusSpan.innerText = msg; };
-
-        if (!id) {
-            alert("No ID found.");
-            return;
-        }
+        const scope = document.getElementById('ado-scope-select').value;
+        const treeMode = document.getElementById('ado-tree-mode').value;
+        const detailLevel = document.getElementById('ado-detail-level').value;
 
         if (scope === 'tree') {
-            const data = await getHierarchyData(id, updateStatus);
+            const data = await getHierarchyData(id, treeMode);
             if (!data) return;
-            const lines = data.map(Formatters[format]);
-            handleOutput(lines, mode, format, `Tree (${data.length})`, updateStatus);
+            const lines = data.map(row => Formatters[format](row, detailLevel));
+            handleOutput(lines, mode, format, `Tree (${data.length} items)`);
         }
         else {
-            const itemData = await getSingleItemData(id, updateStatus);
+            const itemData = await getSingleItemData(id);
             if (!itemData) return;
-            const line = Formatters[format](itemData);
-            handleOutput([line], mode, format, `Item ${id}`, updateStatus);
+            const line = Formatters[format](itemData, detailLevel);
+            handleOutput([line], mode, format, `Item ${id}`);
         }
     }
 
-    function handleOutput(linesArray, mode, format, label, statusCallback) {
+    function handleOutput(linesArray, mode, format, label) {
         const content = linesArray.join(format === 'html' ? '<br>' : '\n');
 
         if (mode === 'console') {
             console.log(`%c 📋 ${label} [${format.toUpperCase()}]:`, 'font-weight: bold; font-size: 14px; color: #00d4ff;');
-            if (format === 'html' || format === 'markdown') console.log(content);
-            else linesArray.forEach(l => console.log(l));
-            statusCallback(`✅ Logged ${label}`);
+            if (format === 'html' || format === 'markdown') {
+                console.log(content);
+            } else {
+                linesArray.forEach(l => console.log(l));
+            }
+            updateStatus(`✅ Logged ${label} as ${format.toUpperCase()}`);
         }
         else if (mode === 'clipboard') {
-            if (format === 'html') GM_setClipboard(content, 'text/html');
-            else GM_setClipboard(content, 'text');
-            statusCallback(`✅ Copied ${label}`);
+            if (format === 'html') {
+                GM_setClipboard(content, 'text/html');
+            } else {
+                GM_setClipboard(content, 'text');
+            }
+            updateStatus(`✅ Copied ${label} as ${format.toUpperCase()}`);
         }
     }
 
-    // --- DOM Injection & Scraper ---
+    // --- UI Helpers ---
 
-    function injectToolbar(containerElement) {
-        // Prevent duplicates in the same container
-        if (containerElement.querySelector('.ado-ctx-toolbar')) return;
+    function updateStatus(msg) {
+        const el = document.getElementById('ado-printer-status');
+        if (el) el.innerText = msg;
+    }
+
+    function getUrlId() {
+        const urlMatch = window.location.pathname.match(/\/edit\/(\d+)/);
+        if (urlMatch) return urlMatch[1];
+        return "";
+    }
+
+    function getIdFromInput() {
+        const val = document.getElementById('ado-id-input').value.trim();
+        if (!val) {
+            alert("Please enter a Work Item ID.");
+            return null;
+        }
+        return val;
+    }
+
+    // --- UI Creation ---
+    function createControlBar() {
+        if (document.getElementById('ado-printer-toolbar')) return;
 
         const div = document.createElement('div');
-        div.className = 'ado-ctx-toolbar';
+        div.id = 'ado-printer-toolbar';
 
         Object.assign(div.style, {
-            position: 'sticky', // Stick to top of the form
-            top: '0',
-            width: '100%',
-            height: '40px',
+            position: 'fixed',
+            top: '0', left: '0', right: '0',
+            minHeight: '60px',
             backgroundColor: '#252526',
             color: '#cccccc',
             display: 'flex',
+            flexWrap: 'wrap',
             alignItems: 'center',
-            padding: '0 10px',
-            zIndex: '999', // Sit above form fields
+            padding: '8px 15px',
+            zIndex: '10000',
             fontFamily: 'Segoe UI, sans-serif',
             fontSize: '12px',
-            boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-            borderBottom: '1px solid #3e3e42',
-            marginBottom: '10px' // Space before form content
+            boxShadow: '0 4px 6px rgba(0,0,0,0.3)',
+            borderBottom: '1px solid #3e3e42'
         });
 
         const makeBtn = (text, title, color, actionId) => {
             return `<button class="ado-btn" data-action="${actionId}" title="${title}"
-                    style="background:${color}; border:1px solid transparent; color:white; margin-left:4px; padding:2px 6px; cursor:pointer; border-radius:2px;">
+                    style="background:${color}; border:1px solid transparent; color:white; margin-left:4px; padding:3px 8px; cursor:pointer; border-radius:2px;">
                     ${text}</button>`;
         };
 
@@ -261,99 +395,89 @@
         const conColor = '#444444';
 
         div.innerHTML = `
-            <span style="font-weight:bold; color: #00d4ff; margin-right:10px;">ADO</span>
+            <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                <span style="font-weight:bold; color: #00d4ff; margin-right:10px;">ADO Print</span>
 
-            <input type="text" class="ado-ctx-id-input" readonly placeholder="..."
-                   style="width: 60px; background:#333; color:#88ff88; border:1px solid #555; text-align:center; padding:2px; font-weight:bold;">
+                <input type="text" id="ado-id-input" value="${getUrlId()}" placeholder="ID"
+                       style="width: 50px; background:#333; color:#fff; border:1px solid #555; text-align:center; padding:3px;">
+                <button id="ado-refresh-id" title="Refresh ID" style="cursor:pointer; background:none; border:none; color:#aaa;">🔄</button>
 
-            <select class="ado-ctx-scope-select" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-left:5px; margin-right:5px;">
-                <option value="single">Item</option>
-                <option value="tree">Tree</option>
-            </select>
+                <div style="width: 1px; height: 20px; background: #555; margin: 0 10px;"></div>
 
-            <div style="width: 1px; height: 20px; background: #555; margin: 0 5px;"></div>
+                <label for="ado-scope-select" style="color:#aaa; margin-right:5px;">Scope:</label>
+                <select id="ado-scope-select" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-right:8px;">
+                    <option value="single">Single Item</option>
+                    <option value="tree">Tree</option>
+                </select>
 
-            <span style="color:#aaa; margin-right:2px;">Clip:</span>
-            ${makeBtn('Txt', 'Copy Text', clipColor, 'clip-text')}
-            ${makeBtn('MD', 'Copy MD', clipColor, 'clip-markdown')}
-            ${makeBtn('HTML', 'Copy HTML', clipColor, 'clip-html')}
+                <label for="ado-tree-mode" style="color:#aaa; margin-right:5px;">Mode:</label>
+                <select id="ado-tree-mode" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-right:8px;">
+                    <option value="direct">Direct</option>
+                    <option value="full">Full</option>
+                </select>
 
-            <div style="width: 1px; height: 20px; background: #555; margin: 0 5px;"></div>
+                <label for="ado-detail-level" style="color:#aaa; margin-right:5px;">Detail:</label>
+                <select id="ado-detail-level" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-right:8px;">
+                    <option value="default">Default</option>
+                    <option value="status">+ Status</option>
+                    <option value="status-assigned">+ Status & Assigned</option>
+                </select>
+            </div>
 
-            <span style="color:#aaa; margin-right:2px;">Log:</span>
-            ${makeBtn('Txt', 'Log Text', conColor, 'con-text')}
-            ${makeBtn('MD', 'Log MD', conColor, 'con-markdown')}
-            ${makeBtn('HTML', 'Log HTML', conColor, 'con-html')}
+            <div style="display: flex; align-items: center; width: 100%;">
+                <div style="width: 1px; height: 20px; background: #555; margin: 0 8px;"></div>
 
-            <div style="flex-grow: 1; text-align: right; margin-left: 10px;">
-                <span class="ado-ctx-status" style="color: #888; font-style: italic; white-space:nowrap;">...</span>
+                <span style="color:#aaa; margin-right:4px;">Clip:</span>
+                ${makeBtn('Txt', 'Copy Plain Text', clipColor, 'clip-text')}
+                ${makeBtn('MD', 'Copy Markdown', clipColor, 'clip-markdown')}
+                ${makeBtn('HTML', 'Copy HTML', clipColor, 'clip-html')}
+
+                <div style="width: 1px; height: 20px; background: #555; margin: 0 8px;"></div>
+
+                <span style="color:#aaa; margin-right:4px;">Log:</span>
+                ${makeBtn('Txt', 'Log Plain Text', conColor, 'con-text')}
+                ${makeBtn('MD', 'Log Markdown', conColor, 'con-markdown')}
+                ${makeBtn('HTML', 'Log HTML', conColor, 'con-html')}
+
+                <div style="flex-grow: 1; text-align: right; margin-left: 10px;">
+                    <span id="ado-printer-status" style="color: #888; font-style: italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Ready</span>
+                </div>
+                <button id="ado-close-bar" style="background:none; border:none; color:#999; cursor:pointer; font-size:16px; margin-left:10px;">&times;</button>
             </div>
         `;
 
-        // Prepend to the container (put it at the top)
-        containerElement.prepend(div);
+        document.body.appendChild(div);
 
-        // Event Listeners
         const actions = {
-            'clip-text': (btn) => processAction(btn, 'clipboard', 'text'),
-            'clip-markdown': (btn) => processAction(btn, 'clipboard', 'markdown'),
-            'clip-html': (btn) => processAction(btn, 'clipboard', 'html'),
-            'con-text': (btn) => processAction(btn, 'console', 'text'),
-            'con-markdown': (btn) => processAction(btn, 'console', 'markdown'),
-            'con-html': (btn) => processAction(btn, 'console', 'html'),
+            'clip-text': () => processAction('clipboard', 'text'),
+            'clip-markdown': () => processAction('clipboard', 'markdown'),
+            'clip-html': () => processAction('clipboard', 'html'),
+            'con-text': () => processAction('console', 'text'),
+            'con-markdown': () => processAction('console', 'markdown'),
+            'con-html': () => processAction('console', 'html'),
         };
 
         div.querySelectorAll('.ado-btn').forEach(btn => {
-            btn.onclick = function() {
-                const actionKey = this.getAttribute('data-action');
-                if (actions[actionKey]) actions[actionKey](this);
+            btn.onclick = () => {
+                const actionKey = btn.getAttribute('data-action');
+                if (actions[actionKey]) actions[actionKey]();
             };
+            btn.onmouseover = () => { btn.style.border = '1px solid #888'; };
+            btn.onmouseout = () => { btn.style.border = '1px solid transparent'; };
         });
+
+        document.getElementById('ado-refresh-id').onclick = () => {
+             const id = getUrlId();
+             if (id) document.getElementById('ado-id-input').value = id;
+        };
+
+        document.getElementById('ado-close-bar').onclick = () => {
+            div.style.display = 'none';
+        };
     }
 
-    // --- Observer Logic ---
-
-    function extractIdFromContainer(container) {
-        // Find link matching /edit/ID inside this specific container
-        const link = container.querySelector(LINK_SELECTOR);
-        if (link && link.href) {
-            const match = link.href.match(/\/edit\/(\d+)/);
-            if (match && match[1]) return match[1];
-        }
-        return null;
-    }
-
-    function scanAndInject() {
-        // Find all work item pages (main view + modals)
-        const containers = document.querySelectorAll(CONTAINER_SELECTOR);
-
-        containers.forEach(container => {
-            // 1. Inject toolbar if missing
-            injectToolbar(container);
-
-            // 2. Update ID if possible
-            const id = extractIdFromContainer(container);
-            const toolbar = container.querySelector('.ado-ctx-toolbar');
-            if (toolbar && id) {
-                const input = toolbar.querySelector('.ado-ctx-id-input');
-                const status = toolbar.querySelector('.ado-ctx-status');
-
-                // Only update if changed
-                if (input.value !== id) {
-                    input.value = id;
-                    status.innerText = "Ready";
-                }
-            }
-        });
-    }
-
-    // --- Start ---
-    const observer = new MutationObserver(scanAndInject);
-    observer.observe(document.body, { childList: true, subtree: true });
-
-    // Initial run
-    setTimeout(scanAndInject, 1500);
-
-    console.log("ADO Contextual Printer v1.1 loaded (Embedded Mode).");
+    // --- Init ---
+    setTimeout(createControlBar, 2000);
+    console.log("ADO Hierarchy Printer v2.0 loaded.");
 
 })();
