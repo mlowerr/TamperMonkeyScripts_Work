@@ -47,7 +47,22 @@
 
     // --- Hierarchy Logic ---
 
-    async function traverseDown(itemId, visitedSet, resultsArray, level = 0) {
+    const HIERARCHY_RULES = {
+        initiative: ['epic'],
+        epic: ['feature'],
+        feature: ['user story', 'story', 'bug']
+    };
+
+    function normalizeType(type) {
+        return (type || '').toLowerCase();
+    }
+
+    function isTerminalType(type) {
+        const t = normalizeType(type);
+        return t === 'story' || t === 'user story' || t === 'bug';
+    }
+
+    async function traverseDown(itemId, visitedSet, resultsArray, level = 0, parentType = null) {
         if (visitedSet.has(itemId)) return;
         visitedSet.add(itemId);
 
@@ -55,10 +70,19 @@
         if (!item) return;
 
         const type = item.fields['System.WorkItemType'];
+        const normalizedType = normalizeType(type);
         const state = item.fields['System.State'];
         const letter = getTypeLetter(type);
         const title = item.fields['System.Title'];
         const url = item._links?.html?.href || '#';
+
+        if (parentType) {
+            const allowedChildren = HIERARCHY_RULES[normalizeType(parentType)];
+            if (allowedChildren && !allowedChildren.includes(normalizedType)) {
+                console.warn(`Skipping child ${itemId} (${type}) of ${parentType} due to hierarchy rules.`);
+                return;
+            }
+        }
 
         const isExcluded = ['Closed', 'Removed'].includes(state);
 
@@ -72,44 +96,45 @@
             });
         }
 
-        if (item.relations) {
+        if (!isTerminalType(type) && item.relations) {
             const children = item.relations.filter(r => r.rel === "System.LinkTypes.Hierarchy-Forward");
             for (const child of children) {
                 const childId = child.url.split('/').pop();
-                await traverseDown(childId, visitedSet, resultsArray, level + 1);
+                await traverseDown(childId, visitedSet, resultsArray, level + 1, type);
             }
         }
     }
 
     async function getRootId(startId, statusCallback) {
         let currentId = startId;
-        let currentItem = await fetchWorkItem(currentId);
+        const visited = new Set();
 
-        if (!currentItem) return null;
+        while (currentId && !visited.has(currentId)) {
+            visited.add(currentId);
+            const currentItem = await fetchWorkItem(currentId);
 
-        if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-            statusCallback("🏁 Started on Epic.");
-            return currentId;
-        }
+            if (!currentItem) return null;
 
-        let parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
-
-        while (parentRel) {
-            const parentId = parentRel.url.split('/').pop();
-            statusCallback(`⬆️ Parent: ${parentId}...`);
-
-            const parentItem = await fetchWorkItem(parentId);
-            if (!parentItem) break;
-
-            currentId = parentId;
-            currentItem = parentItem;
-
-            if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-                statusCallback(`🏔️ Reached Epic (${currentId}).`);
+            const currentType = normalizeType(currentItem.fields['System.WorkItemType']);
+            if (currentType === 'initiative') {
+                statusCallback(`🏔️ Using Initiative (${currentId}) as root.`);
                 break;
             }
 
-            parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+            const parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
+            if (!parentRel) {
+                statusCallback('🔝 No Initiative found above; using current item as root.');
+                break;
+            }
+
+            const parentId = parentRel.url.split('/').pop();
+            if (visited.has(parentId)) {
+                statusCallback('♻️ Circular parent links detected; stopping climb.');
+                break;
+            }
+
+            statusCallback(`⬆️ Parent: ${parentId}...`);
+            currentId = parentId;
         }
 
         return currentId;
