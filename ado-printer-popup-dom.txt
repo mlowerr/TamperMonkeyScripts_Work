@@ -56,6 +56,8 @@
 
         const type = item.fields['System.WorkItemType'];
         const state = item.fields['System.State'];
+        const assignedTo = item.fields['System.AssignedTo'];
+        const assignedDisplay = (typeof assignedTo === 'object') ? (assignedTo.displayName || assignedTo.uniqueName || 'Unassigned') : (assignedTo || 'Unassigned');
         const letter = getTypeLetter(type);
         const title = item.fields['System.Title'];
         const url = item._links?.html?.href || '#';
@@ -67,6 +69,8 @@
                 id: itemId,
                 letter: letter,
                 title: title,
+                state: state,
+                assigned: assignedDisplay,
                 url: url,
                 level: level
             });
@@ -140,16 +144,22 @@
             id: id,
             letter: getTypeLetter(item.fields['System.WorkItemType']),
             title: item.fields['System.Title'],
+            state: item.fields['System.State'],
+            assigned: ((typeof item.fields['System.AssignedTo'] === 'object') ? (item.fields['System.AssignedTo'].displayName || item.fields['System.AssignedTo'].uniqueName) : item.fields['System.AssignedTo']) || 'Unassigned',
             url: item._links?.html?.href || '#'
         };
     }
 
     // --- Formatters & Output ---
 
+    const baseText = (row) => `[${row.letter}${row.id}] ${row.title}`;
+
     const Formatters = {
-        text: (row) => `[${row.letter}${row.id}] ${row.title}`,
+        text: baseText,
         markdown: (row) => `[[${row.letter}${row.id}]](${row.url}) ${row.title}`,
-        html: (row) => `<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`
+        html: (row) => `<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`,
+        status: (row) => `[Status: ${row.state || 'Unknown'}] ${baseText(row)}`,
+        statusAssigned: (row) => `[Status: ${row.state || 'Unknown'} | Assigned: ${row.assigned || 'Unassigned'}] ${baseText(row)}`
     };
 
     async function processAction(btnElement, mode, format) {
@@ -252,6 +262,8 @@
             ${makeBtn('Txt', 'Copy Text', clipColor, 'clip-text')}
             ${makeBtn('MD', 'Copy MD', clipColor, 'clip-markdown')}
             ${makeBtn('HTML', 'Copy HTML', clipColor, 'clip-html')}
+            ${makeBtn('Status', 'Copy Status + Text', clipColor, 'clip-status')}
+            ${makeBtn('Full', 'Copy Status & Assigned + Text', clipColor, 'clip-status-assigned')}
 
             <div style="width: 1px; height: 20px; background: #555; margin: 0 5px;"></div>
 
@@ -259,6 +271,8 @@
             ${makeBtn('Txt', 'Log Text', conColor, 'con-text')}
             ${makeBtn('MD', 'Log MD', conColor, 'con-markdown')}
             ${makeBtn('HTML', 'Log HTML', conColor, 'con-html')}
+            ${makeBtn('Status', 'Log Status + Text', conColor, 'con-status')}
+            ${makeBtn('Full', 'Log Status & Assigned + Text', conColor, 'con-status-assigned')}
 
             <div style="flex-grow: 1; text-align: right; margin-left: 10px;">
                 <span class="ado-ctx-status" style="color: #888; font-style: italic; white-space:nowrap;">...</span>
@@ -273,9 +287,13 @@
             'clip-text': (btn) => processAction(btn, 'clipboard', 'text'),
             'clip-markdown': (btn) => processAction(btn, 'clipboard', 'markdown'),
             'clip-html': (btn) => processAction(btn, 'clipboard', 'html'),
+            'clip-status': (btn) => processAction(btn, 'clipboard', 'status'),
+            'clip-status-assigned': (btn) => processAction(btn, 'clipboard', 'statusAssigned'),
             'con-text': (btn) => processAction(btn, 'console', 'text'),
             'con-markdown': (btn) => processAction(btn, 'console', 'markdown'),
             'con-html': (btn) => processAction(btn, 'console', 'html'),
+            'con-status': (btn) => processAction(btn, 'console', 'status'),
+            'con-status-assigned': (btn) => processAction(btn, 'console', 'statusAssigned'),
         };
 
         div.querySelectorAll('.ado-btn').forEach(btn => {
