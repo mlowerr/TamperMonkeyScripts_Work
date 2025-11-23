@@ -49,7 +49,7 @@
     const HIERARCHY_RULES = {
         initiative: ['epic'],
         epic: ['feature'],
-        feature: ['user story', 'story', 'bug']
+        feature: ['user story', 'story', 'product backlog item', 'bug']
     };
 
     function normalizeType(type) {
@@ -58,7 +58,7 @@
 
     function isTerminalType(type) {
         const t = normalizeType(type);
-        return t === 'story' || t === 'user story' || t === 'bug';
+        return t === 'story' || t === 'user story' || t === 'product backlog item' || t === 'bug';
     }
 
     /**
