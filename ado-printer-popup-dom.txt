@@ -81,15 +81,17 @@
         }
     }
 
-    async function getRootId(startId, statusCallback) {
+    async function getRootId(startId, traversalMode, statusCallback) {
         let currentId = startId;
         let currentItem = await fetchWorkItem(currentId);
+        let initiativeId = null;
 
         if (!currentItem) return null;
 
-        if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-            statusCallback("🏁 Started on Epic.");
-            return currentId;
+        if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+            statusCallback("🏁 Started on Initiative.");
+            initiativeId = currentId;
+            if (traversalMode === 'direct') return currentId;
         }
 
         let parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
@@ -104,20 +106,26 @@
             currentId = parentId;
             currentItem = parentItem;
 
-            if (currentItem.fields['System.WorkItemType'] === 'Epic') {
-                statusCallback(`🏔️ Reached Epic (${currentId}).`);
-                break;
+            if (currentItem.fields['System.WorkItemType'] === 'Initiative') {
+                initiativeId = currentId;
+                statusCallback(`🏔️ Reached Initiative (${currentId}).${traversalMode === 'direct' ? ' Stopping.' : ''}`);
+                if (traversalMode === 'direct') break;
             }
 
             parentRel = currentItem.relations ? currentItem.relations.find(r => r.rel === "System.LinkTypes.Hierarchy-Reverse") : null;
         }
 
+        if (traversalMode === 'direct') {
+            if (initiativeId) return initiativeId;
+            statusCallback("ℹ️ Initiative not found; using top ancestor.");
+        }
+
         return currentId;
     }
 
-    async function getHierarchyData(startId, statusCallback) {
-        statusCallback(`🚀 Scanning ${startId}...`);
-        const rootId = await getRootId(startId, statusCallback);
+    async function getHierarchyData(startId, traversalMode, statusCallback) {
+        statusCallback(`🚀 Scanning ${startId} (${traversalMode})...`);
+        const rootId = await getRootId(startId, traversalMode, statusCallback);
         if (!rootId) {
             statusCallback("❌ No Root.");
             return null;
@@ -158,9 +166,11 @@
         const idInput = toolbar.querySelector('.ado-ctx-id-input');
         const statusSpan = toolbar.querySelector('.ado-ctx-status');
         const scopeSelect = toolbar.querySelector('.ado-ctx-scope-select');
+        const traversalSelect = toolbar.querySelector('.ado-ctx-traversal-select');
 
         const id = idInput.value.trim();
         const scope = scopeSelect.value;
+        const traversalMode = traversalSelect.value;
 
         const updateStatus = (msg) => { statusSpan.innerText = msg; };
 
@@ -170,7 +180,7 @@
         }
 
         if (scope === 'tree') {
-            const data = await getHierarchyData(id, updateStatus);
+            const data = await getHierarchyData(id, traversalMode, updateStatus);
             if (!data) return;
             const lines = data.map(Formatters[format]);
             handleOutput(lines, mode, format, `Tree (${data.length})`, updateStatus);
@@ -244,6 +254,11 @@
             <select class="ado-ctx-scope-select" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-left:5px; margin-right:5px;">
                 <option value="single">Item</option>
                 <option value="tree">Tree</option>
+            </select>
+
+            <select class="ado-ctx-traversal-select" style="background:#333; color:white; border:1px solid #555; padding:2px; border-radius:2px; margin-right:6px;">
+                <option value="direct" selected>Direct</option>
+                <option value="full">Full Tree</option>
             </select>
 
             <div style="width: 1px; height: 20px; background: #555; margin: 0 5px;"></div>
