@@ -147,9 +147,9 @@
     // --- Formatters & Output ---
 
     const Formatters = {
-        text: (row) => `[${row.letter}${row.id}] ${row.title}`,
-        markdown: (row) => `[[${row.letter}${row.id}]](${row.url}) ${row.title}`,
-        html: (row) => `<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`
+        text: (row) => `${'  '.repeat(row.level || 0)}[${row.letter}${row.id}] ${row.title}`,
+        markdown: (row) => `${'  '.repeat(row.level || 0)}[[${row.letter}${row.id}]](${row.url}) ${row.title}`,
+        html: (row) => `${'  '.repeat(row.level || 0)}<a href="${row.url}">[${row.letter}${row.id}]</a> ${row.title}`
     };
 
     async function processAction(btnElement, mode, format) {
