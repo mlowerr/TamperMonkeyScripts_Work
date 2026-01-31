@@ -12,3 +12,8 @@ This repository contains TamperMonkey user scripts that streamline Azure DevOps 
 1. Install the TamperMonkey browser extension.
 2. Create a new userscript in TamperMonkey and paste the contents of the desired `.txt` file.
 3. Navigate to Azure DevOps; the toolbar will appear on matching pages where you can generate and copy the hierarchy or single-item details.
+
+## Maintenance
+
+- `AGENTS.md` contains agent-focused context and workflow expectations for maintaining these scripts.
+- Update `README.md` and `AGENTS.md` whenever project details change so future edits stay efficient and accurate.
