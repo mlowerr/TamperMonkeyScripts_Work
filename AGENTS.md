@@ -1,19 +1,20 @@
 # AGENTS
 
 ## Repository overview
-- This repo stores TamperMonkey userscripts used to streamline Azure DevOps work item workflows.
-- Scripts are stored as plain text files (`.txt`) that can be pasted into TamperMonkey.
+- This repo stores TamperMonkey userscripts that streamline Azure DevOps work item hierarchy reporting.
+- Scripts are maintained as plain-text userscript files (`.txt`) intended to be pasted into TamperMonkey.
 
 ## Key files
-- `ado-printer.txt`: Adds a toolbar to Azure DevOps pages to fetch a work item hierarchy (or a single item) and output it as text/Markdown/HTML via console logging or clipboard copy.
-- `ado-printer-popup-dom.txt`: Variant that injects a toolbar directly into the Azure DevOps work item form; discovers work item IDs from the DOM and outputs via console logging or clipboard copy.
-- `README.md`: High-level usage instructions for installing and using the scripts.
+- `ado-printer.txt`: **Contextual** variant. Injects a compact toolbar into each Azure DevOps work-item form container (`.work-item-form-page`), auto-discovers the current work item ID from DOM links, and supports item/tree output in text/Markdown/HTML to console or clipboard.
+- `ado-printer-popup-dom.txt`: **Global control-bar** variant. Renders a fixed toolbar at the top of the page with manual ID refresh from URL context, then outputs item/tree data in text/Markdown/HTML to console or clipboard.
+- `README.md`: User-facing install and usage documentation for both script variants.
 
 ## Conventions
-- Keep scripts as TamperMonkey-compatible userscript text files.
-- Maintain clear, user-focused descriptions of behavior in `README.md`.
-- There are no automated tests in this repo; validate changes manually in a browser with TamperMonkey when needed.
+- Keep scripts TamperMonkey-compatible (userscript metadata block and `GM_*` APIs as needed).
+- Keep behavior descriptions in `README.md` aligned with actual script behavior.
+- Hierarchy traversal currently excludes `Removed` items and stops descending below `User Story`/`Bug` levels; document any future behavior changes.
+- There are no automated tests in this repo; validate behavior manually in Azure DevOps + TamperMonkey when script logic changes.
 
 ## Maintenance requirements
-- After completing each work request, review and update **this** `AGENTS.md` with any new project knowledge that should help future changes.
-- After completing each work request, review and update `README.md` to keep project information current.
+- After each work request, review this `AGENTS.md` for newly learned repository knowledge and update when useful.
+- After each work request, review `README.md` and keep it accurate to current script behavior and naming.
